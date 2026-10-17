@@ -1,0 +1,120 @@
+name: Build ESP32 Agent app and firmware
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the matching upstream source
+        uses: actions/checkout@v5
+        with:
+          repository: onehumanbeing/esp32-iphone-agent
+          ref: ff2e228087b8326ef1a0d0c414fbeac3b3711401
+          persist-credentials: false
+
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@v2
+        with:
+          version: 1.5.1
+
+      - name: Install the upstream compiler dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.12 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install 'NimBLE-Arduino@2.5.1'
+
+      - name: Build the 8 MB flash / 8 MB OPI PSRAM firmware
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash hardware/flash.sh --build-only
+          test -f hardware/build/hid_bridge.ino.merged.bin
+          test "$(stat -c %s hardware/build/hid_bridge.ino.merged.bin)" -eq 8388608
+          mkdir -p dist
+          cp hardware/build/hid_bridge.ino.merged.bin dist/ESP32-Agent-S3-8MB.merged.bin
+          printf '%s\n' \
+            'Source: onehumanbeing/esp32-iphone-agent' \
+            'Commit: ff2e228087b8326ef1a0d0c414fbeac3b3711401' \
+            'ESP32-S3; 8 MB flash; 8 MB OPI PSRAM; flash merged binary at offset 0x0.' \
+            > dist/BUILD-INFO.txt
+          (cd dist && sha256sum ESP32-Agent-S3-8MB.merged.bin > SHA256SUMS.txt)
+
+      - name: Save the firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-Agent-S3-8MB-firmware
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  iphone-app:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Check out the upstream source
+        uses: actions/checkout@v5
+        with:
+          repository: onehumanbeing/esp32-iphone-agent
+          ref: ff2e228087b8326ef1a0d0c414fbeac3b3711401
+          persist-credentials: false
+
+      - name: Build for a physical iPhone without a signing identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild \
+            -project ios/IPhoneAgent.xcodeproj \
+            -scheme IPhoneAgent \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/iphone-build" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            IA_ENTITLEMENTS= \
+            IA_WIDGET_ENTITLEMENTS= \
+            IA_PRESET_BASE_URL= \
+            IA_PRESET_MODEL= \
+            IA_PRESET_KEY= \
+            build
+
+      - name: Package an unsigned IPA for local signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/iphone-build/Build/Products/Release-iphoneos/IPhoneAgent.app"
+          test -d "$app"
+          platform=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app/Info.plist")
+          test "$platform" = iphoneos
+          lipo -verify_arch arm64 "$app/IPhoneAgent"
+          mkdir -p "$RUNNER_TEMP/ipa-package/Payload" dist
+          ditto "$app" "$RUNNER_TEMP/ipa-package/Payload/IPhoneAgent.app"
+          (
+            cd "$RUNNER_TEMP/ipa-package"
+            /usr/bin/zip -qr "$GITHUB_WORKSPACE/dist/ESP32-Agent-unsigned.ipa" Payload
+          )
+          printf '%s\n' \
+            'Source: onehumanbeing/esp32-iphone-agent' \
+            'Commit: ff2e228087b8326ef1a0d0c414fbeac3b3711401' \
+            'Unsigned arm64 iPhone build; sign locally with AltStore Classic.' \
+            > dist/BUILD-INFO.txt
+          (cd dist && shasum -a 256 ESP32-Agent-unsigned.ipa > SHA256SUMS.txt)
+
+      - name: Save the iPhone app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-Agent-iPhone
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
