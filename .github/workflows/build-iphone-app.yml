@@ -2,12 +2,22 @@ name: Build ESP32 Agent app and firmware
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Build target
+        type: choice
+        default: both
+        options:
+          - both
+          - iphone-app
+          - firmware
 
 permissions:
   contents: read
 
 jobs:
   firmware:
+    if: ${{ inputs.target != 'iphone-app' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -56,6 +66,7 @@ jobs:
           retention-days: 14
 
   iphone-app:
+    if: ${{ inputs.target != 'firmware' }}
     runs-on: macos-26
     timeout-minutes: 30
     steps:
@@ -97,7 +108,7 @@ jobs:
           test -d "$app"
           platform=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app/Info.plist")
           test "$platform" = iphoneos
-          lipo -verify_arch arm64 "$app/IPhoneAgent"
+          lipo "$app/IPhoneAgent" -verify_arch arm64
           mkdir -p "$RUNNER_TEMP/ipa-package/Payload" dist
           ditto "$app" "$RUNNER_TEMP/ipa-package/Payload/IPhoneAgent.app"
           (
